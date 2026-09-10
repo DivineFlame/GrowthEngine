@@ -1,0 +1,379 @@
+version: '3.8'
+
+x-common-variables: &common-variables
+  DATABASE_URL: postgres://${POSTGRES_USER:-orgcomms}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-orgcomms_prod}
+  REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+  NODE_ENV: production
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: false
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  clamav_data:
+    driver: local
+  recordings:
+    driver: local
+  paperclip_cache:
+    driver: local
+
+services:
+  # PostgreSQL 15 with Row-Level Security
+  postgres:
+    image: postgres:15-alpine
+    container_name: growthengine-postgres
+    restart: unless-stopped
+    networks:
+      - backend
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-orgcomms}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-orgcomms_prod}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init-secure.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    user: "999:999"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run/postgresql:size=100M
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+
+  # Redis 7 - Cache & Message Queue
+  redis:
+    image: redis:7-alpine
+    container_name: growthengine-redis
+    restart: unless-stopped
+    networks:
+      - backend
+    command: >
+      redis-server 
+      --appendonly yes 
+      --requirepass ${REDIS_PASSWORD}
+      --bind 0.0.0.0
+      --maxmemory 512mb 
+      --maxmemory-policy allkeys-lru
+      --loglevel notice
+    volumes:
+      - redis_data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    user: "999:999"
+    read_only: true
+    tmpfs:
+      - /tmp:size=50M
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETGID
+      - SETUID
+
+  # ClamAV Antivirus
+  clamav:
+    image: clamav/clamav:latest
+    container_name: growthengine-clamav
+    restart: unless-stopped
+    networks:
+      - backend
+    volumes:
+      - clamav_data:/var/lib/clamav
+    environment:
+      FRESHCLAM_DELAY: 24
+    healthcheck:
+      test: ["CMD", "clamscan", "--version"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+  # Node.js Express API - Main Application Server
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    image: growthengine-api:latest
+    container_name: growthengine-api
+    restart: unless-stopped
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clamav:
+        condition: service_started
+    environment:
+      <<: *common-variables
+      JWT_SECRET: ${JWT_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      CLAMAV_HOST: clamav
+      SARVAM_API_KEY: ${SARVAM_API_KEY}
+      PAPERCLIP_SERVICE: paperclip-transformer:8000
+      HERMES_MODE: premium_multiagent
+      NODE_OPTIONS: --max-old-space-size=1536
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - recordings:/app/recordings
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3001:3001"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    user: "1001:1001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=200M
+      - /app/logs:size=100M
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # Python FastAPI - Content Transformation Service
+  paperclip-transformer:
+    build:
+      context: ./paperclip
+      dockerfile: Dockerfile
+    image: growthengine-paperclip:latest
+    container_name: growthengine-paperclip
+    restart: unless-stopped
+    networks:
+      - backend
+    depends_on:
+      - clamav
+    environment:
+      CLAMAV_HOST: clamav
+      PYTHONUNBUFFERED: 1
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - recordings:/app/recordings
+      - paperclip_cache:/app/cache
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    user: "1001:1001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=200M
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 1G
+
+  # Hermes Orchestrator - Content Publisher & Workflow Engine
+  hermes-orchestrator:
+    build:
+      context: ./hermes
+      dockerfile: Dockerfile
+    image: growthengine-hermes:latest
+    container_name: growthengine-hermes
+    restart: unless-stopped
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *common-variables
+      PAPERCLIP_SERVICE: paperclip-transformer:8000
+      HERMES_MODE: premium_multiagent
+      NODE_OPTIONS: --max-old-space-size=1024
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3002/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    user: "1001:1001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=100M
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  # CSV Handler - Lead Import & Processing Service
+  csv-handler:
+    build:
+      context: ./csv-handler
+      dockerfile: Dockerfile
+    image: growthengine-csv-handler:latest
+    container_name: growthengine-csv-handler
+    restart: unless-stopped
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clamav:
+        condition: service_started
+    environment:
+      <<: *common-variables
+      CLAMAV_HOST: clamav
+      CSV_MAX_ROWS: 5000
+      CSV_MAX_SIZE_MB: 10
+      NODE_OPTIONS: --max-old-space-size=512
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    security_opt:
+      - no-new-privileges:true
+    user: "1001:1001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=100M
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  # Transformer Worker - Redis Queue Worker for Media Processing
+  transformer-worker:
+    build:
+      context: ./transformer
+      dockerfile: Dockerfile
+    image: growthengine-transformer-worker:latest
+    container_name: growthengine-transformer-worker
+    restart: unless-stopped
+    networks:
+      - backend
+    depends_on:
+      - redis
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      PAPERCLIP_SERVICE: paperclip-transformer:8000
+      WORKER_CONCURRENCY: 2
+      NODE_OPTIONS: --max-old-space-size=1024
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    security_opt:
+      - no-new-privileges:true
+    user: "1001:1001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=100M
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # Nginx Frontend - Static SPA Server
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: growthengine-frontend:latest
+    container_name: growthengine-frontend
+    restart: unless-stopped
+    networks:
+      - frontend
+    ports:
+      - "127.0.0.1:3005:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    user: "101:101"
+    read_only: true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
