@@ -1,5 +1,3 @@
-version: '3.8'
-
 networks:
   frontend:
   backend:
@@ -132,7 +130,6 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       PAPERCLIP_SERVICE: paperclip-transformer:8000
-      HERMES_MODE: premium_multiagent
     depends_on:
       - redis
       - postgres
@@ -148,7 +145,6 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=200M
-      - /app/cache:size=500M
     security_opt:
       - no-new-privileges:true
     cap_drop:
