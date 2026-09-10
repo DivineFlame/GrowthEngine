@@ -1,16 +1,17 @@
-version: '3.8'
 networks:
   frontend:
   backend:
     internal: true
   db:
     internal: true
+
 volumes:
   pgdata:
   redisdata:
   recordings:
   clamav_data:
   paperclip_cache:
+
 services:
   clamav:
     image: clamav/clamav:latest
@@ -19,6 +20,7 @@ services:
     networks: [backend]
     volumes:
       - clamav_data:/var/lib/clamav
+
   postgres:
     image: postgres:15-alpine
     container_name: orgcomms-postgres
@@ -31,8 +33,13 @@ services:
       - /run/postgresql:size=100M
     security_opt:
       - no-new-privileges:true
-    cap_drop: [ALL]
-    cap_add: [CHOWN, SETGID, SETUID, DAC_OVERRIDE]
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-orgcomms}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -43,6 +50,7 @@ services:
       - ./postgres/init-secure.sql:/docker-entrypoint-initdb.d/init-secure.sql:ro
     ports:
       - "127.0.0.1:5432:5432"
+
   redis:
     image: redis:7-alpine
     container_name: orgcomms-redis
@@ -54,11 +62,15 @@ services:
       - /tmp:size=50M
     security_opt:
       - no-new-privileges:true
-    cap_drop: [ALL]
-    cap_add: [SETGID, SETUID]
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETGID
+      - SETUID
     command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD} --bind 127.0.0.1 --maxmemory 512mb --maxmemory-policy allkeys-lru
     volumes:
       - redisdata:/data
+
   api:
     build:
       context: ./api
@@ -73,9 +85,16 @@ services:
       - /app/logs:size=100M
     security_opt:
       - no-new-privileges:true
-    cap_drop: [ALL]
-    cap_add: [CHOWN, SETGID, SETUID]
-    depends_on: [postgres, redis, clamav]
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    depends_on:
+      - postgres
+      - redis
+      - clamav
     environment:
       NODE_ENV: production
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
@@ -91,6 +110,7 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
       - "127.0.0.1:3001:3001"
+
   hermes-orchestrator:
     build:
       context: ./hermes
@@ -104,12 +124,16 @@ services:
       - /tmp:size=100M
     security_opt:
       - no-new-privileges:true
-    cap_drop: [ALL]
+    cap_drop:
+      - ALL
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       PAPERCLIP_SERVICE: paperclip-transformer:8000
-    depends_on: [redis, postgres]
+    depends_on:
+      - redis
+      - postgres
+
   paperclip-transformer:
     build:
       context: ./paperclip
@@ -121,13 +145,16 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=200M
-      - /app/cache:size=500M
     security_opt:
       - no-new-privileges:true
-    cap_drop: [ALL]
+    cap_drop:
+      - ALL
     volumes:
       - recordings:/app/recordings
       - paperclip_cache:/app/cache
+    depends_on:
+      - clamav
+
   csv-handler:
     build:
       context: ./csv-handler
@@ -141,11 +168,17 @@ services:
       - /tmp:size=100M
     security_opt:
       - no-new-privileges:true
-    cap_drop: [ALL]
+    cap_drop:
+      - ALL
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       CLAMAV_HOST: clamav
+    depends_on:
+      - postgres
+      - redis
+      - clamav
+
   transformer-worker:
     build:
       context: ./transformer
@@ -159,11 +192,14 @@ services:
       - /tmp:size=100M
     security_opt:
       - no-new-privileges:true
-    cap_drop: [ALL]
+    cap_drop:
+      - ALL
     environment:
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       PAPERCLIP_SERVICE: paperclip-transformer:8000
-    depends_on: [redis]
+    depends_on:
+      - redis
+
   frontend:
     build:
       context: ./frontend
