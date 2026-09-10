@@ -1,1 +1,1 @@
-module.exports = (roles)=>(req,res,next)=>next();
+module.exports=(roles)=>(req,res,next)=>next();
